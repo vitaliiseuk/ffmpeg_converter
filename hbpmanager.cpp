@@ -5,7 +5,6 @@
 #include "hbpmanager.h"
 #include <vector>
 
-#if 0
 #ifdef _DEBUG
 
 CHBPManager g_hbp;
@@ -70,15 +69,13 @@ void CHBPManager::Clear()
 
 		assert(m_index >= 0 && m_index < 4);
 
-		SetBits(cxt.Dr7, m_index*2, 1, 0);
-		if (!SetThreadContext(thisThread, &cxt))
-			assert(false);
+		// SetBits(cxt.Dr7, m_index*2, 1, 0);
+		// if (!SetThreadContext(thisThread, &cxt))
+		// 	assert(false);
 
-		m_index = -1;
+		// m_index = -1;
 	}
 	m_listThreads.clear();
 }
-
-#endif // _DEBUG
 
 #endif
