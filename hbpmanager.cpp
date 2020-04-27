@@ -5,6 +5,7 @@
 #include "hbpmanager.h"
 #include <vector>
 
+#if 0
 #ifdef _DEBUG
 
 CHBPManager g_hbp;
@@ -23,6 +24,22 @@ void CHBPManager::Set(HANDLE hThreadID, void* address, int bytes, Condition when
 			THREADENTRY32 te;
 			te.dwSize = sizeof(te);
 			if (Thread32First(h, &te)) {
+				do {
+					if (te.dwSize >= FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) +
+						sizeof(te.th32OwnerProcessID)) {
+						if (te.th32OwnerProcessID == dwProcId)
+						{
+							HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+							if (hThread != NULL)
+								m_listThreads.push_back(hThread);
+							else
+							{
+								assert(0);
+							}
+						}
+					}
+					te.dwSize = sizeof(te);
+				} while (Thread32Next(h, &te));
 			}
 			CloseHandle(h);
 		}
@@ -51,6 +68,28 @@ void CHBPManager::Set(HANDLE hThreadID, void* address, int bytes, Condition when
 		if (!GetThreadContext(thisThread, &cxt))
 			assert(false);
 
+		for (m_index = 0; m_index < 4; ++m_index)
+		{
+			if ((cxt.Dr7 & (1 << (m_index * 2))) == 0)
+				break;
+		}
+		assert(m_index < 4);
+
+		switch (m_index)
+		{
+		case 0: cxt.Dr0 = (DWORD)address; break;
+		case 1: cxt.Dr1 = (DWORD)address; break;
+		case 2: cxt.Dr2 = (DWORD)address; break;
+		case 3: cxt.Dr3 = (DWORD)address; break;
+		default: assert(false);
+		}
+
+		SetBits(cxt.Dr7, 16 + (m_index * 4), 2, when);
+		SetBits(cxt.Dr7, 18 + (m_index * 4), 2, len);
+		SetBits(cxt.Dr7, m_index * 2, 1, 1);
+
+		if (!SetThreadContext(thisThread, &cxt))
+			assert(false);
 	}
 }
 
@@ -69,13 +108,15 @@ void CHBPManager::Clear()
 
 		assert(m_index >= 0 && m_index < 4);
 
-		// SetBits(cxt.Dr7, m_index*2, 1, 0);
-		// if (!SetThreadContext(thisThread, &cxt))
-		// 	assert(false);
+		SetBits(cxt.Dr7, m_index*2, 1, 0);
+		if (!SetThreadContext(thisThread, &cxt))
+			assert(false);
 
-		// m_index = -1;
+		m_index = -1;
 	}
 	m_listThreads.clear();
 }
+
+#endif // _DEBUG
 
 #endif

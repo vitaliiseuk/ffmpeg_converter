@@ -8,13 +8,27 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include <io.h>
+#if defined(_WIN32) && !defined(__MINGW32CE__)
+#  include <fcntl.h>
+#  ifdef lseek
+#   undef lseek
+#  endif
+#  define lseek(f,p,w) _lseeki64((f), (p), (w))
+#  ifdef stat
+#   undef stat
+#  endif
+#  define stat _stati64
+#  ifdef fstat
+#   undef fstat
+#  endif
+#  define fstat(f,s) _fstati64((f), (s))
+#endif /* defined(_WIN32) && !defined(__MINGW32CE__) */
+
 extern "C"
 {
 	#include "libavformat/avformat.h"
-		/* FIXME: those are internal headers, ffserver _really_ shouldn't use them */
 	#include "libavformat/ffm.h"
-	//#include "libavformat/network.h"
-	//#include "libavformat/os_support.h"
 	#include "libavformat/rtpdec.h"
 	#include "libavformat/rtpproto.h"
 	#include "libavformat/rtsp.h"
@@ -82,7 +96,13 @@ typedef struct FFServerStream {
     int feed_streams[FFSERVER_MAX_STREAMS]; /* index of streams in the feed */
     char feed_filename[1024];     /* file name of the feed storage, or
                                      input file name for a stream */
-
+    int64_t pid;                    /* Of ffmpeg process */
+    time_t pid_start;             /* Of ffmpeg process */
+    char **child_argv;
+    struct FFServerStream *next;
+    unsigned bandwidth;           /* bandwidth, in kbits/s */
+    /* RTSP options */
+    char *rtsp_option;
     /* multicast specific */
     int is_multicast;
     struct in_addr multicast_ip;
@@ -90,6 +110,18 @@ typedef struct FFServerStream {
     int multicast_ttl;
     int loop;                     /* if true, send the stream in loops (only meaningful if file) */
     char single_frame;            /* only single frame */
+
+    /* feed specific */
+    int feed_opened;              /* true if someone is writing to the feed */
+    int is_feed;                  /* true if it is a feed */
+    int readonly;                 /* True if writing is prohibited to the file */
+    int truncate;                 /* True if feeder connection truncate the feed file */
+    int conns_served;
+    int64_t bytes_served;
+    int64_t feed_max_size;        /* maximum storage size, zero means unlimited */
+    int64_t feed_write_index;     /* current write position in feed (it wraps around) */
+    int64_t feed_size;            /* current size of feed */
+    struct FFServerStream *next_feed;
 } FFServerStream;
 
 typedef struct FFServerConfig {
@@ -103,20 +135,22 @@ typedef struct FFServerConfig {
     uint64_t max_bandwidth;
     int debug;
     char logfilename[1024];
-    // sockaddr_in http_addr;
-    // sockaddr_in rtsp_addr;
+    sockaddr_in http_addr;
+    sockaddr_in rtsp_addr;
     int errors;
     int warnings;
     int use_defaults;
-
+    // Following variables MUST NOT be used outside configuration parsing code.
+    enum AVCodecID guessed_audio_codec_id;
+    enum AVCodecID guessed_video_codec_id;
     AVDictionary *video_opts;     /* AVOptions for video encoder */
     AVDictionary *audio_opts;     /* AVOptions for audio encoder */
     AVCodecContext *dummy_actx;   /* Used internally to test audio AVOptions. */
     AVCodecContext *dummy_vctx;   /* Used internally to test video AVOptions. */
-    // int no_audio;
-    // int no_video;
-    // int line_num;
-    // int stream_use_defaults;
+    int no_audio;
+    int no_video;
+    int line_num;
+    int stream_use_defaults;
 } FFServerConfig;
 
 #define PATH_LENGTH 1024
@@ -252,6 +286,56 @@ typedef struct FeedData {
 
 #define HAVE_GETADDRINFO 1
 
+
+
+/*FILE *get_preset_file(char *filename, size_t filename_size, const char *preset_name, int is_path, const char *codec_name)
+{
+	FILE *f = NULL;
+	int i;
+	const char *base[3] = { getenv("FFMPEG_DATADIR"),
+		getenv("HOME"),
+		FFMPEG_DATADIR, };
+
+	if (is_path) {
+		av_strlcpy(filename, preset_name, filename_size);
+		f = fopen(filename, "r");
+	}
+	else {
+#ifdef _WIN32
+		char datadir[MAX_PATH], *ls;
+		base[2] = NULL;
+
+		if (GetModuleFileNameA(GetModuleHandleA(NULL), datadir, sizeof(datadir)-1))
+		{
+			for (ls = datadir; ls < datadir + strlen(datadir); ls++)
+			if (*ls == '\\') *ls = '/';
+
+			if (ls = strrchr(datadir, '/'))
+			{
+				*ls = 0;
+				strncat(datadir, "/ffpresets", sizeof(datadir)-1 - strlen(datadir));
+				base[2] = datadir;
+			}
+		}
+#endif
+		for (i = 0; i < 3 && !f; i++) {
+			if (!base[i])
+				continue;
+			snprintf(filename, filename_size, "%s%s/%s.ffpreset", base[i],
+				i != 1 ? "" : "/.ffmpeg", preset_name);
+			f = fopen(filename, "r");
+			if (!f && codec_name) {
+				snprintf(filename, filename_size,
+					"%s%s/%s-%s.ffpreset",
+					base[i], i != 1 ? "" : "/.ffmpeg", codec_name,
+					preset_name);
+				f = fopen(filename, "r");
+			}
+		}
+	}
+
+	return f;
+} */
 
 static int64_t ffm_read_write_index(int fd)
 {
@@ -395,143 +479,143 @@ public:
 public:
 
 	CFFStreamServer()
-    {
-        first_http_ctx = NULL;
-        cur_time = 0;
-        current_bandwidth = 0;
-        nb_connections = 0;
-        fStop = true;
-    }
+	{
+		first_http_ctx = NULL;
+		cur_time = 0;
+		current_bandwidth = 0;
+		nb_connections = 0;
+		fStop = true;
+	}
 
-    int ffserver_save_avoption(const char *opt, const char *arg, int type, FFServerConfig *config);
-    int ffserver_save_avoption_int(const char *opt, int64_t arg,    int type, FFServerConfig *config);
-    void ffserver_get_arg(char *buf, int buf_size, const char *pp);
-    int ffserver_set_codec(AVCodecContext *ctx, const char *codec_name, FFServerConfig *config);
-    int ffserver_opt_preset(const char *arg, int type, FFServerConfig *config);
-    AVOutputFormat* ffserver_guess_format(const char *short_name, const char *filename, const char *mime_type);
-    int ffserver_set_int_param(int *dest, const char *value, int factor,    int min, int max, FFServerConfig *config, const char *error_msg, ...);
-    int ffserver_set_float_param(float *dest, const char *value, float factor, float min, float max,    FFServerConfig *config, const char *error_msg, ...);
-    int ffserver_parse_config_global(FFServerConfig *config, const char *cmd, const char *p);
-    int ffserver_parse_config_stream(FFServerConfig *config, const char *cmd, const char *p, FFServerStream **pstream);
-    int ffserver_parse_config_redirect(FFServerConfig *config, const char *cmd, const char **p, FFServerStream **predirect);
-    int ffserver_parse_ffconfig(const char *filename, char* szRtspPort, char* szRtspName, FFServerConfig *config);
-    void ffserver_free_child_args(void *argsp);
-    int ff_neterrno(void);
-    int ff_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
-    void ff_freeaddrinfo(struct addrinfo *res);
+	int ffserver_save_avoption(const char *opt, const char *arg, int type, FFServerConfig *config);
+	int ffserver_save_avoption_int(const char *opt, int64_t arg,	int type, FFServerConfig *config);
+	void ffserver_get_arg(char *buf, int buf_size, const char *pp);
+	int	ffserver_set_codec(AVCodecContext *ctx, const char *codec_name,	FFServerConfig *config);
+	int ffserver_opt_preset(const char *arg, int type, FFServerConfig *config);
+	AVOutputFormat* ffserver_guess_format(const char *short_name, const char *filename, const char *mime_type);
+	int ffserver_set_int_param(int *dest, const char *value, int factor,	int min, int max, FFServerConfig *config, const char *error_msg, ...);
+	int ffserver_set_float_param(float *dest, const char *value, float factor, float min, float max,	FFServerConfig *config,	const char *error_msg, ...);
+	int ffserver_parse_config_global(FFServerConfig *config, const char *cmd, const char *p);
+	int ffserver_parse_config_stream(FFServerConfig *config, const char *cmd, const char *p, FFServerStream **pstream);
+	int ffserver_parse_config_redirect(FFServerConfig *config, const char *cmd, const char **p, FFServerStream **predirect);
+	int ffserver_parse_ffconfig(const char *filename, char* szRtspPort, char* szRtspName, FFServerConfig *config);
+	void ffserver_free_child_args(void *argsp);
+	int ff_neterrno(void);
+	int ff_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
+	void ff_freeaddrinfo(struct addrinfo *res);
 
-    void add_codec(FFServerStream *stream, AVCodecContext *av, FFServerConfig *config);
+	void add_codec(FFServerStream *stream, AVCodecContext *av, FFServerConfig *config);
 
-    void new_connection(int server_fd, int is_rtsp);
-    void close_connection(HTTPContext *c);
+	void new_connection(int server_fd, int is_rtsp);
+	void close_connection(HTTPContext *c);
 
-    /* HTTP handling */
-    int handle_connection(HTTPContext *c);
-    void print_stream_params(AVIOContext *pb, FFServerStream *stream);
-    int open_input_stream(HTTPContext *c, const char *info);
+	/* HTTP handling */
+	int handle_connection(HTTPContext *c);
+	void print_stream_params(AVIOContext *pb, FFServerStream *stream);
+	int open_input_stream(HTTPContext *c, const char *info);
 
-    /* should convert the format at the same time */
-    /* send data starting at c->buffer_ptr to the output connection
-    * (either UDP or TCP)
-    */
-    int http_send_data(HTTPContext *c);
+	/* should convert the format at the same time */
+	/* send data starting at c->buffer_ptr to the output connection
+	* (either UDP or TCP)
+	*/
+	int http_send_data(HTTPContext *c);
 
-/*  int http_receive_data(HTTPContext *c);
+/*	int http_receive_data(HTTPContext *c);
 
-    int http_start_receive_data(HTTPContext *c);*/
+	int http_start_receive_data(HTTPContext *c);*/
 
-    /* RTSP handling */
-    int rtsp_parse_request(HTTPContext *c);
-    void rtsp_cmd_describe(HTTPContext *c, const char *url);
-    void rtsp_cmd_options(HTTPContext *c, const char *url);
-    void rtsp_cmd_setup(HTTPContext *c, const char *url, RTSPMessageHeader *h);
-    void rtsp_cmd_play(HTTPContext *c, const char *url, RTSPMessageHeader *h);
-    void rtsp_cmd_interrupt(HTTPContext *c, const char *url, RTSPMessageHeader *h, int pause_only);
-    void rtsp_reply_header(HTTPContext *c, enum RTSPStatusCode error_number);
-    void rtsp_reply_error(HTTPContext *c, enum RTSPStatusCode error_number);
+	/* RTSP handling */
+	int rtsp_parse_request(HTTPContext *c);
+	void rtsp_cmd_describe(HTTPContext *c, const char *url);
+	void rtsp_cmd_options(HTTPContext *c, const char *url);
+	void rtsp_cmd_setup(HTTPContext *c, const char *url, RTSPMessageHeader *h);
+	void rtsp_cmd_play(HTTPContext *c, const char *url, RTSPMessageHeader *h);
+	void rtsp_cmd_interrupt(HTTPContext *c, const char *url, RTSPMessageHeader *h, int pause_only);
+	void rtsp_reply_header(HTTPContext *c, enum RTSPStatusCode error_number);
+	void rtsp_reply_error(HTTPContext *c, enum RTSPStatusCode error_number);
 
-    /* SDP handling */
-    int prepare_sdp_description(FFServerStream *stream, uint8_t **pbuffer,  struct in_addr my_ip);
-    
-    /* RTP handling */
-    HTTPContext *rtp_new_connection(struct sockaddr_in *from_addr, FFServerStream *stream, const char *session_id, enum RTSPLowerTransport rtp_protocol);
-    int rtp_new_av_stream(HTTPContext *c, int stream_index, struct sockaddr_in *dest_addr, HTTPContext *rtsp_c);
-    
-    /* utils */
-    
-    /* open a listening socket */
-    int socket_open_listen(struct sockaddr_in *my_addr);
+	/* SDP handling */
+	int prepare_sdp_description(FFServerStream *stream, uint8_t **pbuffer,  struct in_addr my_ip);
+	
+	/* RTP handling */
+	HTTPContext *rtp_new_connection(struct sockaddr_in *from_addr, FFServerStream *stream, const char *session_id, enum RTSPLowerTransport rtp_protocol);
+	int rtp_new_av_stream(HTTPContext *c, int stream_index, struct sockaddr_in *dest_addr, HTTPContext *rtsp_c);
+	
+	/* utils */
+	
+	/* open a listening socket */
+	int socket_open_listen(struct sockaddr_in *my_addr);
 
-    /* start all multicast streams */
-    void start_multicast(void);
+	/* start all multicast streams */
+	void start_multicast(void);
 
-    /* main loop of the HTTP server */
-    int http_server(void);
+	/* main loop of the HTTP server */
+	int http_server(void);
 
-    /* start waiting for a new HTTP/RTSP request */
-    void start_wait_request(HTTPContext *c, int is_rtsp);
+	/* start waiting for a new HTTP/RTSP request */
+	void start_wait_request(HTTPContext *c, int is_rtsp);
 
-    void http_send_too_busy_reply(int fd);
+	void http_send_too_busy_reply(int fd);
 
-    int find_stream_in_feed(FFServerStream *feed, AVCodecContext *codec, int bit_rate);
+	int find_stream_in_feed(FFServerStream *feed, AVCodecContext *codec, int bit_rate);
 
-    int modify_current_stream(HTTPContext *c, char *rates);
+	int modify_current_stream(HTTPContext *c, char *rates);
 
-    void fmt_bytecount(AVIOContext *pb, int64_t count);
+	void fmt_bytecount(AVIOContext *pb, int64_t count);
 
-    /* return the server clock (in us) */
-    int64_t get_server_clock(HTTPContext *c);
+	/* return the server clock (in us) */
+	int64_t get_server_clock(HTTPContext *c);
 
-    /* return the estimated time (in us) at which the current packet must be sent */
-    int64_t get_packet_send_clock(HTTPContext *c);
+	/* return the estimated time (in us) at which the current packet must be sent */
+	int64_t get_packet_send_clock(HTTPContext *c);
 
-    int http_prepare_data(HTTPContext *c);
+	int http_prepare_data(HTTPContext *c);
 
-    HTTPContext * find_rtp_session(const char *session_id);
+	HTTPContext * find_rtp_session(const char *session_id);
 
-    RTSPTransportField * find_transport(RTSPMessageHeader *h, enum RTSPLowerTransport lower_transport);
+	RTSPTransportField * find_transport(RTSPMessageHeader *h, enum RTSPLowerTransport lower_transport);
 
-    /**
-    * find an RTP connection by using the session ID. Check consistency
-    * with filename
-    */
-    HTTPContext * find_rtp_session_with_url(const char *url, const char *session_id);
+	/**
+	* find an RTP connection by using the session ID. Check consistency
+	* with filename
+	*/
+	HTTPContext * find_rtp_session_with_url(const char *url, const char *session_id);
 
-    
-    /********************************************************************/
-    /* ffserver initialization */
-    
-    /* FIXME: This code should use avformat_new_stream() */
-    AVStream * add_av_stream1(FFServerStream *stream, AVCodecContext *codec, int copy);
+	
+	/********************************************************************/
+	/* ffserver initialization */
+	
+	/* FIXME: This code should use avformat_new_stream() */
+	AVStream * add_av_stream1(FFServerStream *stream, AVCodecContext *codec, int copy);
 
-    /* return the stream number in the feed */
-    int add_av_stream(FFServerStream *feed, AVStream *st);
+	/* return the stream number in the feed */
+	int add_av_stream(FFServerStream *feed, AVStream *st);
 
-    void remove_stream(FFServerStream *stream);
+	void remove_stream(FFServerStream *stream);
 
-    /* specific MPEG4 handling : we extract the raw parameters */
-    void extract_mpeg4_header(AVFormatContext *infile);
+	/* specific MPEG4 handling : we extract the raw parameters */
+	void extract_mpeg4_header(AVFormatContext *infile);
 
-    /* compute the needed AVStream for each file */
-    void build_file_streams(void);
+	/* compute the needed AVStream for each file */
+	void build_file_streams(void);
 
-    /* compute the bandwidth used by each stream */
-    void compute_bandwidth(void);
+	/* compute the bandwidth used by each stream */
+	void compute_bandwidth(void);
 
-    void update_datarate(DataRateData *drd, int64_t count);
+	void update_datarate(DataRateData *drd, int64_t count);
 
-    /**
-    * compute the real filename of a file by matching it without its
-    * extensions to all the stream's filenames
-    */
-    void compute_real_filename(char *filename, int max_size);
+	/**
+	* compute the real filename of a file by matching it without its
+	* extensions to all the stream's filenames
+	*/
+	void compute_real_filename(char *filename, int max_size);
 
-    int compute_datarate(DataRateData *drd, int64_t count);
+	int compute_datarate(DataRateData *drd, int64_t count);
 
-    int resolve_host(struct in_addr *sin_addr, const char *hostname);
+	int resolve_host(struct in_addr *sin_addr, const char *hostname);
 
-    int Start(char *szInUrl, char* szRtspPort, char* szRtspName);
-    void Stop();
+	int Start(char *szInUrl, char* szRtspPort, char* szRtspName);
+	void Stop();
 };
 
 

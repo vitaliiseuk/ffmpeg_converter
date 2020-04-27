@@ -1,6 +1,7 @@
 #ifndef __HBMMANAGER__INCLUDE__MARK__
 #define __HBMMANAGER__INCLUDE__MARK__
 #include <list>
+#if 0
 #ifdef _DEBUG
 
 class CHBPManager
@@ -36,3 +37,6 @@ protected:
 extern CHBPManager g_hbp;
 
 #endif // _DEBUG
+
+#endif // _HARDWAREBP_H_
+#endif
