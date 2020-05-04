@@ -1,0 +1,310 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Cell</name>
+    </assembly>
+    <members>
+        <member name="T:GridCtrl.Cell">
+            <summary>
+            Summary description for Cell.
+            </summary>
+        </member>
+        <member name="T:GridCtrl.CellEditor">
+            <summary>
+            
+            </summary>
+        </member>
+        <member name="T:GridCtrl.CellSizer">
+            <summary>
+            Summary description for CellSizer.
+            </summary>
+        </member>
+        <member name="T:GridCtl.CellFactory">
+            <summary>
+            Factory responsible for constructing cells
+            </summary>
+        </member>
+        <member name="T:GridCtrl.GridObject">
+            <summary>
+            Summary description for GridObject.
+            </summary>
+        </member>
+        <member name="P:GridCtrl.GridObject.Size">
+            <summary>
+            IGridObject interface 
+            </summary>
+        </member>
+        <member name="T:GridCtrl.Row">
+            <summary>
+            Summary description for Row.
+            </summary>
+        </member>
+        <member name="T:GridCtrl.Grid">
+            <summary>
+            Summary description for Grid.
+            </summary>
+        </member>
+        <member name="F:GridCtrl.Grid.components">
+            <summary>
+            Required designer variable.
+            </summary>
+            
+        </member>
+        <member name="M:GridCtrl.Grid.GetRowCount">
+            <summary>
+            Returns the number of rows (including fixed rows)
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetColumnCount">
+            <summary>
+            Returns the number of columns (including fixed columns)
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetFixedRowCount">
+            <summary>
+            Returns the number of fixed rows
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetFixedColumnCount">
+            <summary>
+            Returns the number of fixed columns
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.SetRowCount(System.Int32)">
+            <summary>
+            Sets the number of rows (including fixed rows
+            </summary>
+            <param name="rows"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.SetColumnCount(System.Int32)">
+            <summary>
+            Sets the number of columns (including fixed columns)
+            </summary>
+            <param name="cols"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.SetFixedColumnCount(System.Int32)">
+            <summary>
+            Sets the number of fixed columns
+            </summary>
+            <param name="cols"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.SetFixedRowCount(System.Int32)">
+            <summary>
+            Sets the number of rows
+            </summary>
+            <param name="rows"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.GetRowHeight(System.Int32)">
+            <summary>
+            Get Row Height
+            </summary>
+            <param name="row"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.SetRowHeight(System.Int32,System.UInt32)">
+            <summary>
+            Set the row height
+            </summary>
+            <param name="row"></param>
+            <param name="height"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.GetColumnWidth(System.Int32)">
+            <summary>
+            Get Column Width
+            </summary>
+            <param name="col"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.SetColumnWidth(System.Int32,System.Int32)">
+            <summary>
+            Set Column Width
+            </summary>
+            <param name="col"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetRowList">
+            <summary>
+            Returns a row collection
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetColList">
+            <summary>
+            Returns a column collection
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.Dispose(System.Boolean)">
+            <summary>
+            Clean up any resources being used.
+            </summary>
+        </member>
+        <member name="M:GridCtrl.Grid.InitializeComponent">
+            <summary>
+            Required method for Designer support - do not modify 
+            the contents of this method with the code editor.
+            </summary>
+        </member>
+        <member name="M:GridCtrl.Grid.GridSize">
+            <summary>
+            Get the size of the grid
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.AddRow">
+            <summary>
+            Adds a row using the default value
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.AddRow(System.UInt32)">
+            <summary>
+            Adds a row using the a predefined height
+            </summary>
+            <param name="height"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.AddColumn">
+            <summary>
+            Adds a column using a default width
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.AddColumn(System.Int32)">
+            <summary>
+            Adds a column using a width
+            </summary>
+            <param name="width"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetRow(System.Int32)">
+            <summary>
+            Gets a row object from a row number
+            </summary>
+            <param name="r"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetColumn(System.Int32)">
+            <summary>
+            Gets a column from a predefined column
+            </summary>
+            <param name="c"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.Draw(System.Int32,System.Int32,System.Drawing.Graphics)">
+            <summary>
+            Draws the grid
+            </summary>
+            <param name="xOffset"></param>
+            <param name="yOffset"></param>
+            <param name="g"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.DrawBackground(System.Drawing.Graphics)">
+            <summary>
+            Override to draw grid background
+            </summary>
+            <param name="g"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.GetCell(System.Int32,System.Int32)">
+            <summary>
+            Gets a cell at a given row and column
+            </summary>
+            <param name="r"></param>
+            <param name="c"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.HandleHitTest(System.Drawing.Point@,GridCtrl.GridObject@)">
+            <summary>
+            Internal stuff for handling hit testing
+            </summary>
+            <param name="pt"></param>
+            <param name="selectObject"></param>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetBounds">
+            <summary>
+            Gets the bounding grid rectangle
+            </summary>
+            <returns></returns>
+        </member>
+        <member name="M:GridCtrl.Grid.GetCellFromPoint(System.Drawing.Point)">
+            <summary>
+            Gets a cell from a mouse position
+            </summary>
+            <param name="pt"></param>
+            <returns></returns>
+            
+        </member>
+        <member name="M:GridCtrl.Grid.Grid_MouseWheel(System.Object,System.Windows.Forms.MouseEventArgs)">
+            <summary>
+            Support for mousewheel 
+            </summary>
+            <param name="sender"></param>
+            <param name="e"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.Grid_DoubleClick(System.Object,System.EventArgs)">
+            <summary>
+            To do implement double click on cell header (row/col autosize)
+            </summary>
+            <param name="sender"></param>
+            <param name="e"></param>
+        </member>
+        <member name="M:GridCtrl.Grid.CreateCell(GridCtrl.Row,GridCtrl.Column)">
+            <summary>
+            Override to construct your own cells
+            </summary>
+            <param name="r"></param>
+            <param name="c"></param>
+            <returns></returns>
+        </member>
+        <member name="P:GridCtrl.Grid.ToolTips">
+            <summary>
+            Enables/disables tooltips
+            </summary>
+        </member>
+        <member name="P:GridCtrl.Grid.EditMode">
+            <summary>
+            Gets/Sets whether or not grid can edit
+            </summary>
+        </member>
+        <member name="P:GridCtrl.Grid.GridLine">
+            <summary>
+            Sets/Gets grid line style
+            </summary>
+        </member>
+        <member name="P:GridCtrl.Grid.ImageStyle">
+            <summary>
+            Sets/Gets image style
+            </summary>
+        </member>
+        <member name="P:GridCtrl.Grid.Image">
+            <summary>
+            Sets or Get the grid background image
+            </summary>
+        </member>
+        <member name="P:GridCtrl.Grid.SelectionMode">
+            <summary>
+            Sets/Gets the selection mode of the grid
+            </summary>
+        </member>
+        <member name="P:GridCtrl.Grid.GridOpacity">
+            <summary>
+            Sets or gets the Opacity value
+            </summary>
+        </member>
+        <member name="T:GridCtrl.Grid.GridLineStyle">
+            <summary>
+            Style of grid lines
+            </summary>
+        </member>
+        <member name="T:GridCtrl.Column">
+            <summary>
+            Summary description for Column.
+            </summary>
+        </member>
+    </members>
+</doc>
