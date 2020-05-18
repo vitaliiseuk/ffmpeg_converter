@@ -21,6 +21,26 @@ void pktqueue_create_decPkts(PKTQUEUE* ppq)
 	ppq->vsemw = CreateSemaphore(NULL, ppq->vsize, ppq->vsize, NULL);
 }
 
+void CFFStreamServer::ffserver_get_arg(char *buf, int buf_size, const char *pp)
+{
+    const char *p;
+    char *q;
+    int quote = 0;
+
+    p = pp;
+    q = buf;
+
+    while (av_isspace(*p)) p++;
+
+    if (*p == '\"' || *p == '\'')
+        quote = *p++;
+
+    while (*p != '\0') {
+        if (quote && *p == quote || !quote && av_isspace(*p))
+            break;
+    }
+}
+
 void pktqueue_destroy_decPkts(PKTQUEUE* ppq)
 {
 	if (ppq->apkts) free(ppq->apkts);
@@ -36,55 +56,6 @@ void pktqueue_destroy_decPkts(PKTQUEUE* ppq)
 
 	ppq->asemr = ppq->asemw = 0;
 	ppq->vsemr = ppq->vsemw = 0;
-}
-
-BOOL pktqueue_create(PKTQUEUE *ppq)
-{
-    int i;
-
-    // default size
-    if (ppq->asize == 0) ppq->asize = DEF_PKT_QUEUE_ASIZE;
-    if (ppq->vsize == 0) ppq->vsize = DEF_PKT_QUEUE_VSIZE;
-    ppq->fsize = ppq->asize + ppq->vsize;
-
-    // alloc buffer & semaphore
-    ppq->bpkts = (AVPacket* )malloc(ppq->fsize * sizeof(AVPacket ));
-    ppq->fpkts = (AVPacket**)malloc(ppq->fsize * sizeof(AVPacket*));
-//    ppq->apkts = (AVPacket**)malloc(ppq->asize * sizeof(AVPacket*));
-//    ppq->vpkts = (AVPacket**)malloc(ppq->vsize * sizeof(AVPacket*));
-#if 1
-    ppq->fsemr = CreateSemaphore(NULL, ppq->fsize, ppq->fsize, NULL);
-    //ppq->asemr = CreateSemaphore(NULL, 0         , ppq->asize, NULL);
-    //ppq->asemw = CreateSemaphore(NULL, ppq->asize, ppq->asize, NULL);
-    //ppq->vsemr = CreateSemaphore(NULL, 0         , ppq->vsize, NULL);
-    //ppq->vsemw = CreateSemaphore(NULL, ppq->vsize, ppq->vsize, NULL);
-#else
-	ppq->fsemr = CreateSemaphore(NULL, 1, 1, NULL);
-	ppq->asemr = CreateSemaphore(NULL, 0, 1, NULL);
-	ppq->asemw = CreateSemaphore(NULL, 1, 1, NULL);
-	ppq->vsemr = CreateSemaphore(NULL, 0, 1, NULL);
-	ppq->vsemw = CreateSemaphore(NULL, 1, 1, NULL);
-
-#endif
-
-    // check invalid
-    if (  !ppq->bpkts || !ppq->fpkts || /*!ppq->apkts || !ppq->vpkts ||*/ !ppq->fsemr /*|| !ppq->asemr || !ppq->asemw || !ppq->vsemr || !ppq->vsemw*/) {
-        pktqueue_destroy(ppq);
-        return FALSE;
-    }
-
-    // clear packets
-    memset(ppq->bpkts, 0, ppq->fsize * sizeof(AVPacket ));
-    //memset(ppq->apkts, 0, ppq->asize * sizeof(AVPacket*));
-    //memset(ppq->vpkts, 0, ppq->vsize * sizeof(AVPacket*));
-
-    // init fpkts & fpktnum
-    for ( i = 0 ; i < ppq->fsize ; i++ ) 
-	{
-        ppq->fpkts[i] = &(ppq->bpkts[i]);
-    }
-    ppq->fpktnum = ppq->fsize;
-    return TRUE;
 }
 
 void pktqueue_destroy(PKTQUEUE *ppq)
@@ -230,6 +201,42 @@ bool pktqueue_write_request(PKTQUEUE *ppq, AVPacket **pppkt)
 	return true;
 }
 
+int CFFStreamServer::ffserver_parse_config_redirect(FFServerConfig *config, const char *cmd, const char **p, FFServerStream **predirect)
+{
+    FFServerStream *redirect;
+    av_assert0(predirect);
+    redirect = *predirect;
+
+    if (!av_strcasecmp(cmd, "<Redirect")) {
+        char *q;
+        redirect = (FFServerStream*)av_mallocz(sizeof(FFServerStream));
+        if (!redirect)
+            return AVERROR(ENOMEM);
+
+        ffserver_get_arg(redirect->filename, sizeof(redirect->filename), p);
+        q = strrchr(redirect->filename, '>');
+        if (*q)
+            *q = '\0';
+        redirect->stream_type = STREAM_TYPE_REDIRECT;
+        *predirect = redirect;
+        return 0;
+    }
+    av_assert0(redirect);
+    if (!av_strcasecmp(cmd, "URL")) {
+        ffserver_get_arg(redirect->feed_filename,
+            sizeof(redirect->feed_filename), p);
+    }
+    else if (!av_strcasecmp(cmd, "</Redirect>")) {
+        if (!redirect->feed_filename[0])
+            ERROR("No URL found for <Redirect>\n");
+        *predirect = NULL;
+    }
+    else {
+        ERROR("Invalid entry '%s' inside <Redirect></Redirect>\n", cmd);
+    }
+    return 0;
+}
+
 void pktqueue_write_release(PKTQUEUE *ppq, bool bIncrease)
 {
     ReleaseSemaphore(ppq->fsemr, 1, NULL);
@@ -239,32 +246,6 @@ void pktqueue_write_release(PKTQUEUE *ppq, bool bIncrease)
 		InterlockedIncrement(&(ppq->fhead));
 		InterlockedCompareExchange(&(ppq->fhead), 0, ppq->fsize);
 	}
-}
-
-void pktqueue_write_done_a(PKTQUEUE *ppq, bool bDecode)
-{
-//	//////TRACE("WAIT HANDLE 17 : %x\n", ppq->asemw);
-    
-	if (bDecode)
-	{
-		WaitForSingleObject(ppq->asemw, -1);
-
-		ppq->apkts[ppq->atail] = ppq->fpkts[ppq->fhead];
-
-		////TRACE("pktqueue_write_done_a ---- atail -------- %d\n", ppq->atail);
-		////TRACE("pktqueue_write_done_a ---- fhead -------- %d\n", ppq->fhead);
-		//TRACE("pktqueue_write_done_v ---- ftail -------- %d\n", ppq->ftail);
-		//TRACE("pktqueue_write_done_v ---- fhead -------- %d\n", ppq->fhead);
-
-		InterlockedIncrement(&(ppq->atail));
-		InterlockedCompareExchange(&(ppq->atail), 0, ppq->asize);
-		InterlockedIncrement(&(ppq->apktnum));
-	}
-
-	InterlockedIncrement(&(ppq->fhead));
-	InterlockedCompareExchange(&(ppq->fhead), 0, ppq->fsize);
-
-    ReleaseSemaphore(ppq->asemr, 1, NULL);
 }
 
 void pktqueue_write_done_v(PKTQUEUE *ppq, bool bDecode)

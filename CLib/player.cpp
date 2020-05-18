@@ -201,102 +201,116 @@ int AddVideoStream(AVStream *&video_st, AVFormatContext *&oc, AVCodec **codec, e
 	return RS_OK;
 }
 
-HANDLE	__stdcall FFM_API_XVRRecorderOpen(const char *szOutUrl, int nWidth, int nHeight)
+void __stdcall FFM_API_GetParameter(HANDLE hPlayer, DWORD id, void *param)
 {
-	int ret = 0;
+    if (!hPlayer || !param) return;
+    PLAYER *player = (PLAYER*)hPlayer;
 
-	// av register all
-	avcodec_register_all();
-	av_register_all();
+    switch (id)
+    {
+    case PARAM_VIDEO_WIDTH:
+        if (!player->pVideoCodecContext) *(int*)param = 0;
+        else *(int*)param = player->pVideoCodecContext->width;
+        break;
 
-	XVR_RECORDER* recorder = NULL;
+    case PARAM_VIDEO_HEIGHT:
+        if (!player->pVideoCodecContext) *(int*)param = 0;
+        else *(int*)param = player->pVideoCodecContext->height;
+        break;
 
-	recorder = (XVR_RECORDER*)malloc(sizeof(XVR_RECORDER));
-	memset(recorder, 0, sizeof(XVR_RECORDER));
+	case PARAM_ASPECT_RATIO:
+		if (!player->pVideoCodecContext) *(double*)param = 0;
+		else *(double*)param = av_q2d(player->pVideoCodecContext->sample_aspect_ratio);
+		break;
+    }
+}
 
-	if (szOutUrl)
-		strcpy(recorder->szOutUrl, szOutUrl);
-	else
-		goto xvr_recorder_open_fail; // return FALSE;
-
-	AVFormatContext *ofcx = NULL;
-	AVOutputFormat *ofmt = NULL;
-
-	ofmt = av_guess_format(NULL, "tmp.avi", NULL);
-	ofcx = avformat_alloc_context();
-	ofcx->oformat = ofmt;
-
-	// Create output stream
-	AVCodec *out_vid_codec = NULL, *out_aud_codec = NULL;
-
-	AVStream *out_vid_strm = NULL, *out_aud_strm = NULL;
-
-	if (ofmt->video_codec != AV_CODEC_ID_NONE)
+void processClosing(HANDLE hPlayer, BOOL doCheckOpeningEnd = TRUE)
+{
+	PLAYER* player = (PLAYER*)hPlayer;
+	if (doCheckOpeningEnd && player->stage == 1)
 	{
-		out_vid_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-		//out_vid_codec = avcodec_find_encoder(ofmt->video_codec);
-		if (NULL == out_vid_codec)
+		while (player->stage != 2)
 		{
-			goto xvr_recorder_open_fail; //return NULL;
-		}
-		else
-		{
-			out_vid_strm = avformat_new_stream(ofcx, out_vid_codec);
-			if (NULL == out_vid_strm)
-			{
-				goto xvr_recorder_open_fail; //return false;
-			}
-			else
-			{
-				out_vid_strm->id = 0;
-
-				AVCodecContext* c = out_vid_strm->codec;
-				avcodec_get_context_defaults3(c, out_vid_codec);
-				c->codec_id = AV_CODEC_ID_H264;
-				c->bit_rate = 500 * 1000;
-				c->width = nWidth;
-				c->height = nHeight;
-				c->time_base.den = 25 * 1000;
-				c->time_base.num = 1000;
-				c->gop_size = 12;
-				c->pix_fmt = AV_PIX_FMT_YUV420P;
-
-			
-			}
+			Sleep(50);
 		}
 	}
 
 
-	if (!(ofmt->flags & AVFMT_NOFILE))
+	//TerminateThread(player->hStreamingThread, 0);
+	if (player->nPlayerStatus != PLAYER_STOP)
 	{
-		if (avio_open2(&ofcx->pb, recorder->szOutUrl, AVIO_FLAG_WRITE, NULL, NULL) < 0)
+		playerstop(hPlayer); 
+	}
+	std::list<HWND> listRenderWindow;
+	HANDLE           hCoreRender = NULL;
+	if (player->hCoreRender)
+	{
+		GetRenderWindowList(player->hCoreRender, listRenderWindow);
+		hCoreRender = player->hCoreRender;
+		renderclose(player->hCoreRender);
+		//player->hCoreRender = NULL;
+	}
+
+	if (player->pVideoCodecContext)
+	{
+		if (player->bUseDxva)
 		{
-			goto xvr_recorder_open_fail; //return NULL;
+			//dxva2_uninit(player->pVideoCodecContext);
+			//av_free(player->pVideoCodecContext->hwaccel_context);
 		}
+		avcodec_close(player->pVideoCodecContext);
+
+		if (player->bUseDxva)
+			dxva2_uninit(player->pVideoCodecContext);
+
+		player->pVideoCodecContext = NULL;
 	}
-	/* Write the stream header, if any. */
-	if (avformat_write_header(ofcx, NULL) < 0)
+
+	if (player->pAudioCodecContext)
 	{
-		goto xvr_recorder_open_fail; //return NULL;
+		avcodec_close(player->pAudioCodecContext);
+		player->pAudioCodecContext = NULL;
 	}
 
-	strcpy_s(ofcx->filename, recorder->szOutUrl);
+	if (player->pAVFormatContext)
+	{
+		avformat_close_input(&(player->pAVFormatContext));
+		player->pAVFormatContext = NULL;
+	}
 
-	recorder->pOutFormat = ofmt;
-	recorder->pOutAVFormatContext = ofcx;
-	recorder->pOutVidStream = out_vid_strm;
-	//recorder->pOutAudStream = out_aud_strm;
+	// destroy packet queue
+	pktqueue_destroy(&(player->PacketQueue));
 
-	recorder->isRecording = true;
-	recorder->isVRecordingFirst = true;
-	recorder->isARecordingFirst = true;
+	char szInUrl[1024];
+	void* pRenderObject;
+	PLAY_MODE		play_mode;
+	char szRtspPort[16];
+	char szRtspName[128];
+	NotifyCallBackFunc funcTmp;
+	
 
-	return (HANDLE)recorder;
+	EnterCriticalSection(player->pcsNotify);
+	funcTmp = player->pNotifyCallBackFunc;
 
-xvr_recorder_open_fail:
-	free(recorder);
-	recorder = NULL;
-	return NULL;
+	CRITICAL_SECTION* pCS = player->pcsNotify;
+	CRITICAL_SECTION* pCSBusy = player->pcsBusy;
+	memset(player, 0, sizeof(PLAYER));
+
+	strcpy(player->szInUrl, szInUrl);
+	
+	player->pcsNotify = pCS;
+	player->pcsBusy = pCSBusy;
+
+	player->pNotifyCallBackFunc = funcTmp;
+	LeaveCriticalSection(player->pcsNotify);
+
+	player->hCoreRender = hCoreRender;
+	std::list<HWND>::iterator iter;
+	for (iter = listRenderWindow.begin(); iter != listRenderWindow.end(); iter++)
+	{
+		AddRenderWindow(player->hCoreRender, *iter);
+	}
 }
 
 struct HKeyHolder
@@ -374,473 +388,7 @@ BOOL    __stdcall FFM_API_UnInitialize()
 	return TRUE;
 }
 
-static DWORD WINAPI RecordThreadProc(PLAYER *player)
-{
-	AVPacket *packet = NULL;
 
-	int i_vid_index = player->iVideoStreamIndex;
-	int i_aud_index = player->iAudioStreamIndex;
-
-	AVStream* in_vid_strm = player->pAVFormatContext->streams[i_vid_index];
-	AVStream* in_aud_strm = player->pAVFormatContext->streams[i_aud_index];
-
-	AVFormatContext *ofcx = player->pOutAVFormatContext;
-	AVOutputFormat *ofmt = player->pOutFormat;
-	AVStream *out_vid_strm = player->pOutVidStream;
-	AVStream *out_aud_strm = player->pOutAudStream;
-
-	int64_t recordingStartVidPTS = -1, recordingStartAudPTS = -1;
-	int64_t recordingStartVidDTS = -1, recordingStartAudDTS = -1;
-	AVPacket outpkt;
-
-	int iCurPTS = 0;
-	
-	if (player->bDecode)
-		iCurPTS = rendergetcurpts(player->hCoreRender);
-	else
-		iCurPTS = pktqueue_get_cur_pts(&(player->PacketQueue));
-
-	iCurPTS /= player->dVideoTimeBase;
-
-	long curpos = player->nRecStartPOS; //pktqueue_find_record_start_pos(&(player->PacketQueue), i_vid_index, iCurPTS, 3);
-
-	int64_t nGenedTime = 0;
-	bool fWrite = false;
-
-	while (player->isRecording && player->nPlayerStatus == PLAYER_PLAY)
-	{
-		long fhead = player->PacketQueue.fhead;
-		
-		if (curpos == fhead)
-		{
-			pktqueue_read_done(&(player->PacketQueue));
-			::Sleep(100);
-			continue;
-		}
-
-		pktqueue_read_request(&(player->PacketQueue), &packet, curpos);
-
-		if ((packet->flags & AV_PKT_FLAG_CORRUPT) == AV_PKT_FLAG_CORRUPT || (packet->pts < 0 || packet->dts < 0))
-		{			
-			pktqueue_read_done(&(player->PacketQueue));
-			//TRACE("Corrupted...\n");
-			curpos++;
-			if (curpos == player->PacketQueue.fsize)
-				curpos = 0;
-			continue;
-		}
-
-
-		if (packet->stream_index == i_vid_index)
-		{
-
-			if (player->isVRecordingFirst /*&& (packet->flags & AV_PKT_FLAG_KEY)*/)
-			{
-				player->isVRecordingFirst = false;
-				recordingStartVidPTS = packet->pts;
-				recordingStartVidDTS = packet->dts;
-			}
-
-			if (!player->isVRecordingFirst)
-			{
-				av_init_packet(&outpkt);
-
-				outpkt.data = packet->data;
-				outpkt.size = packet->size;
-				outpkt.stream_index = packet->stream_index;
-
-				outpkt.flags = packet->flags;
-				if (packet->pts > 0)
-				{
-					outpkt.pts = av_rescale_q(packet->pts - recordingStartVidPTS, in_vid_strm->time_base, out_vid_strm->time_base);
-					outpkt.dts = av_rescale_q(packet->dts - recordingStartVidDTS, in_vid_strm->time_base, out_vid_strm->time_base);
-				}
-				else
-				{
-					outpkt.pts = packet->pts;
-					outpkt.dts = packet->dts;
-				}
-
-				//if (outpkt.buf)
-				{
-					if (player->nRecMode == RECORD_ALWAYS || player->nRecMode == RECORD_MOTION_DETECT || player->nRecMode == RECORD_VOICE_DETECT ||
-						(player->nRecMode == RECORD_KEYFRAME && (outpkt.flags & AV_PKT_FLAG_KEY) == AV_PKT_FLAG_KEY))
-					{
-
-						if (av_interleaved_write_frame(ofcx, &outpkt) < 0)
-						{
-							//TRACE("Failed Video Write...\n");
-						}
-						else
-						{
-							out_vid_strm->codec->frame_number++;
-						}
-					}
-
-					if (player->nRecMode == RECORD_SMART )
-					{
-						int64_t dur = 4000000;
-
-						if (player->bDetected == true)
-						{
-							//nGenedTime = GetTickCount64(); // packet->pts;
-							nGenedTime = packet->pts;
-							//player->bDetected = false;
-							player->nAfterRecTime /= player->dVideoTimeBase;
-							fWrite = true;
-						}
-						
-						if (fWrite && !player->bDetected)
-						{
-							//dur = GetTickCount64() - nGenedTime;//packet->pts - nGenedTime;
-							dur = packet->pts - nGenedTime;
-
-							if (fWrite && dur > player->nAfterRecTime * 1000 && (outpkt.flags & AV_PKT_FLAG_KEY))
-							{
-								fWrite = false;							
-								nGenedTime = 0;
-							}
-						}
-
-						if ((outpkt.flags & AV_PKT_FLAG_KEY) == AV_PKT_FLAG_KEY || fWrite)
-						{												
-
-							if (av_interleaved_write_frame(ofcx, &outpkt) < 0)
-							{
-								//TRACE("Failed Video Write...\n");
-							}
-							else
-							{
-								out_vid_strm->codec->frame_number++;
-							}
-						}
-					}
-				}
-			}
-		}
-
-		else if (packet->stream_index == i_aud_index)
-		{
-			if (!player->isVRecordingFirst && player->isARecordingFirst)
-			{
-				recordingStartAudPTS = packet->pts;
-				recordingStartAudDTS = packet->pts;
-				player->isARecordingFirst = false;
-			}
-
-			if (!player->isVRecordingFirst && !player->isARecordingFirst)
-			{
-				av_init_packet(&outpkt);
-				outpkt.data = packet->data;
-				outpkt.size = packet->size;
-				outpkt.stream_index = packet->stream_index;
-				outpkt.flags = packet->flags;
-
-				if (packet->pts > 0)
-				{
-					outpkt.pts = av_rescale_q(packet->pts - recordingStartAudPTS, in_aud_strm->time_base, out_aud_strm->time_base);
-					outpkt.dts = av_rescale_q(packet->dts - recordingStartAudDTS, in_aud_strm->time_base, out_aud_strm->time_base);
-				}
-				else
-				{
-					outpkt.pts = packet->pts;
-					outpkt.dts = packet->dts;
-				}
-
-				//if (outpkt.buf)
-				{
-					if (av_interleaved_write_frame(ofcx, &outpkt) < 0)
-					{
-						//TRACE("Failed Audio Write...\n");
-					}
-					else
-					{
-						out_aud_strm->codec->frame_number++;
-					}
-				}
-
-			}
-		}
-
-		pktqueue_read_done(&(player->PacketQueue));
-
-		curpos++;
-
-		if (curpos == player->PacketQueue.fsize)
-			curpos = 0;
-	}
-
-	return 0;
-}
-
-static DWORD WINAPI StopRecordThreadProc(PLAYER *player)
-{
-	::Sleep(player->nAfterRecTime * 1000);
-
-	if (!player->hRecordThread)
-		return true;
-
-	{
-		player->isRecording = false;
-
-		//TRACE("WAIT HANDLE 0 : %x\n", player->hRecordThread);
-		WaitForSingleObject(player->hRecordThread, -1);
-		CloseHandle(player->hRecordThread);
-		player->hRecordThread = NULL;
-
-		AVFormatContext *ofcx = player->pOutAVFormatContext;
-		AVOutputFormat *ofmt = player->pOutFormat;
-
-		if (ofcx)
-		{
-			av_write_trailer(ofcx);
-			avio_close(ofcx->pb);
-			avformat_free_context(ofcx);
-		}
-
-		player->isARecordingFirst = true;
-		player->isVRecordingFirst = true;
-	}	
-
-	return true;
-}
-
-void	__stdcall FFM_API_GenerateSignal(HANDLE hPlayer, int nAfterSec)
-{
-	PLAYER* player = (PLAYER*)hPlayer;
-
-	if (!player->isRecording || player->nRecMode != RECORD_SMART)
-		return;
-
-	player->nAfterRecTime = nAfterSec;
-	player->bDetected = !(player->bDetected);
-}
-
-BOOL	__stdcall FFM_API_StartRecording(HANDLE hPlayer, const char *szOutUrl, int mode, int nPreRecTime)
-{
-	int ret = 0;
-	
-	PLAYER* player = (PLAYER*)hPlayer;
-
-	if (player->isRecording)
-		return FALSE;
-
-	if (szOutUrl)
-		strcpy(player->szOutUrl, szOutUrl);
-	else
-		return FALSE;
-
-	if (mode == RECORD_NO)
-		return FALSE;
-
-	if ( mode == RECORD_MOTION_DETECT || mode == RECORD_VOICE_DETECT)
-		player->nPreRecTime = nPreRecTime;
-	else
-	{
-		player->nPreRecTime = 0;
-	}	
-
-	////////////////// for the temp ////////////////////
-	// player->nPreRecTime = 0;
-	////////////////////////////////////////////////////
-
-	AVFormatContext *ofcx = NULL;
-	AVOutputFormat *ofmt = NULL;
-
-	ofmt = av_guess_format(NULL, player->szOutUrl, NULL);
-	ofmt = av_guess_format(NULL, "tmp.avi", NULL);
-	ofcx = avformat_alloc_context();
-	ofcx->oformat = ofmt;
-
-	// Create output stream
-	AVCodec *out_vid_codec = NULL, *out_aud_codec = NULL;
-
-	AVStream *in_vid_strm = NULL, *in_aud_strm = NULL, *out_vid_strm = NULL, *out_aud_strm = NULL;
-
-	if (player->iVideoStreamIndex == -1)
-		in_vid_strm = NULL;
-	else
-		in_vid_strm = player->pAVFormatContext->streams[player->iVideoStreamIndex];
-
-	if (player->iAudioStreamIndex == -1)
-		in_aud_strm = NULL;
-	else
-		in_aud_strm = player->pAVFormatContext->streams[player->iAudioStreamIndex];
-
-	if (ofmt->video_codec != AV_CODEC_ID_NONE && in_vid_strm != NULL)
-	{
-		out_vid_codec = avcodec_find_encoder(ofmt->video_codec);
-		if (NULL == out_vid_codec)
-		{
-			ret = RTSP_CODEC_OPEN_FAILED;
-			return false;
-		}
-		else
-		{
-			out_vid_strm = avformat_new_stream(ofcx, out_vid_codec);
-			if (NULL == out_vid_strm)
-			{
-				ret = RTSP_CODEC_OPEN_FAILED;
-				return false;
-			}
-			else
-			{
-				if (avcodec_copy_context(out_vid_strm->codec, in_vid_strm->codec) != 0)
-				{
-					ret = RTSP_CODEC_OPEN_FAILED;
-					return false;
-				}
-				else
-				{
-
-				}
-			}
-		}
-	}
-
-
-	if (ofmt->audio_codec != AV_CODEC_ID_NONE && in_aud_strm != NULL)
-	{
-		out_aud_codec = avcodec_find_encoder(ofmt->audio_codec);
-		if (NULL == out_aud_codec)
-		{
-			ret = RTSP_CODEC_OPEN_FAILED;
-			return false;
-		}
-		else
-		{
-			out_aud_strm = avformat_new_stream(ofcx, out_aud_codec);
-			if (NULL == out_aud_strm)
-			{
-				ret = RTSP_CODEC_OPEN_FAILED;
-				return false;
-			}
-			else
-			{
-				if (avcodec_copy_context(out_aud_strm->codec, in_aud_strm->codec) != 0)
-				{
-					ret = RTSP_CODEC_OPEN_FAILED;
-					return false;
-				}
-				else
-				{
-
-				}
-			}
-		}
-	}
-
-	if (!(ofmt->flags & AVFMT_NOFILE))
-	{
-		if (avio_open2(&ofcx->pb, player->szOutUrl, AVIO_FLAG_WRITE, NULL, NULL) < 0)
-		{
-			ret = RTSP_CODEC_OPEN_FAILED;
-			return false;
-		}
-	}
-	/* Write the stream header, if any. */
-	if (avformat_write_header(ofcx, NULL) < 0)
-	{
-		ret = RTSP_CODEC_OPEN_FAILED;
-		return false;
-	}
-
-	strcpy_s(ofcx->filename, player->szOutUrl);
-
-	player->pOutFormat = ofmt;
-	player->pOutAVFormatContext = ofcx;
-	player->pOutVidStream = out_vid_strm;
-	player->pOutAudStream = out_aud_strm;
-
-	player->isRecording = true;
-	player->isVRecordingFirst = true;
-	player->isARecordingFirst = true;
-
-	int i_vid_index = player->iVideoStreamIndex;
-	int i_aud_index = player->iAudioStreamIndex;
-
-	int iCurPTS = 0;
-	if (player->bDecode)
-		iCurPTS = rendergetcurpts(player->hCoreRender);
-	else
-		iCurPTS = pktqueue_get_cur_pts(&(player->PacketQueue));
-
-	iCurPTS /= player->dVideoTimeBase;
-
-	player->nRecStartPOS = pktqueue_find_record_start_pos(&(player->PacketQueue), i_vid_index, iCurPTS, player->nPreRecTime * player->nInputFps);
-
-	player->nRecMode = (RECORD_MODE)mode;
-
-	player->hRecordThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)RecordThreadProc, player, 0, 0);
-
-	return true; 
-}
-
-void __stdcall FFM_API_StopRecording(HANDLE hPlayer, int nAfterRecTime)
-{
-	PLAYER* player = (PLAYER*)hPlayer;
-
-	if (!player->hRecordThread)
-		return;
-	
-	if (player->nRecMode == RECORD_MOTION_DETECT || player->nRecMode == RECORD_VOICE_DETECT)
-		player->nAfterRecTime = nAfterRecTime;
-	else
-	{
-		player->nAfterRecTime = 0;
-	}
-
-	TRACE("\n---------AfterRecTime---------%d\n", player->nAfterRecTime);
-
-	player->hRecordStopThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)StopRecordThreadProc, player, 0, 0);
-
-	WaitForSingleObject(player->hRecordStopThread, -1);
-	CloseHandle(player->hRecordStopThread);
-	player->hRecordStopThread = NULL;
-
-/*	{
-		player->isRecording = false;
-
-		WaitForSingleObject(player->hRecordThread, -1);
-		CloseHandle(player->hRecordThread);
-		player->hRecordThread = NULL;
-
-		AVFormatContext *ofcx = player->pOutAVFormatContext;
-		AVOutputFormat *ofmt = player->pOutFormat;
-
-		if (ofcx)
-		{
-			av_write_trailer(ofcx);
-			avio_close(ofcx->pb);
-			avformat_free_context(ofcx);
-		}
-
-		player->isARecordingFirst = true;
-		player->isVRecordingFirst = true;
-	}	*/
-
-/*	PLAYER* player = (PLAYER*)hPlayer;
-
-	if (!player->isRecording)
-		return;
-
-	{
-		player->isRecording = false;
-
-		AVFormatContext *ofcx = player->pOutAVFormatContext;
-		AVOutputFormat *ofmt = player->pOutFormat;
-
-		if (ofcx)
-		{
-			av_write_trailer(ofcx);
-			avio_close(ofcx->pb);
-			avformat_free_context(ofcx);
-		}
-
-		player->isARecordingFirst = true;
-		player->isVRecordingFirst = true;
-	} */
-}
 
 void NotifyCallBack(HANDLE handle, int nMainCode, int nAuxCode, char* param)
 {

@@ -4,37 +4,89 @@
 
 #include "cmdutils.h"
 
-int CFFStreamServer::resolve_host(struct in_addr *sin_addr, const char *hostname)
+HANDLE	__stdcall FFM_API_XVRRecorderOpen(const char *szOutUrl, int nWidth, int nHeight)
 {
+	int ret = 0;
 
-	if (!ff_inet_aton(hostname, sin_addr)) {
-#if HAVE_GETADDRINFO
-		struct addrinfo *ai, *cur;
-		struct addrinfo hints = { 0 };
-		hints.ai_family = AF_INET;
-		if (getaddrinfo(hostname, NULL, &hints, &ai))
-			return -1;
-		/* getaddrinfo returns a linked list of addrinfo structs.
-		* Even if we set ai_family = AF_INET above, make sure
-		* that the returned one actually is of the correct type. */
-		for (cur = ai; cur; cur = cur->ai_next) {
-			if (cur->ai_family == AF_INET) {
-				*sin_addr = ((struct sockaddr_in *)cur->ai_addr)->sin_addr;
-				freeaddrinfo(ai);
-				return 0;
+	// av register all
+	avcodec_register_all();
+	av_register_all();
+
+	XVR_RECORDER* recorder = NULL;
+
+	recorder = (XVR_RECORDER*)malloc(sizeof(XVR_RECORDER));
+	memset(recorder, 0, sizeof(XVR_RECORDER));
+
+	if (szOutUrl)
+		strcpy(recorder->szOutUrl, szOutUrl);
+	else
+		goto xvr_recorder_open_fail; // return FALSE;
+
+	AVFormatContext *ofcx = NULL;
+	AVOutputFormat *ofmt = NULL;
+
+	ofmt = av_guess_format(NULL, "tmp.avi", NULL);
+	ofcx = avformat_alloc_context();
+	ofcx->oformat = ofmt;
+
+	// Create output stream
+	AVCodec *out_vid_codec = NULL, *out_aud_codec = NULL;
+
+	AVStream *out_vid_strm = NULL, *out_aud_strm = NULL;
+
+	if (ofmt->video_codec != AV_CODEC_ID_NONE)
+	{
+		out_vid_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+		//out_vid_codec = avcodec_find_encoder(ofmt->video_codec);
+		if (NULL == out_vid_codec)
+		{
+			goto xvr_recorder_open_fail; //return NULL;
+		}
+		else
+		{
+			out_vid_strm = avformat_new_stream(ofcx, out_vid_codec);
+			if (NULL == out_vid_strm)
+			{
+				goto xvr_recorder_open_fail; //return false;
+			}
+			else
+			{
+				out_vid_strm->id = 0;
+
+				AVCodecContext* c = out_vid_strm->codec;
+				avcodec_get_context_defaults3(c, out_vid_codec);
+				c->codec_id = AV_CODEC_ID_H264;
+				c->bit_rate = 500 * 1000;
+				c->width = nWidth;
+				c->height = nHeight;
+				c->time_base.den = 25 * 1000;
+				c->time_base.num = 1000;
+				c->gop_size = 12;
+				c->pix_fmt = AV_PIX_FMT_YUV420P;
+
+			
 			}
 		}
-		freeaddrinfo(ai);
-		return -1;
-#else
-		struct hostent *hp;
-		hp = gethostbyname(hostname);
-		if (!hp)
-			return -1;
-		memcpy(sin_addr, hp->h_addr_list[0], sizeof(struct in_addr));
-#endif
 	}
-	return 0;
+
+
+	if (!(ofmt->flags & AVFMT_NOFILE))
+	{
+		if (avio_open2(&ofcx->pb, recorder->szOutUrl, AVIO_FLAG_WRITE, NULL, NULL) < 0)
+		{
+			goto xvr_recorder_open_fail; //return NULL;
+		}
+	}
+	/* Write the stream header, if any. */
+	if (avformat_write_header(ofcx, NULL) < 0)
+	{
+		goto xvr_recorder_open_fail; //return NULL;
+	}
+
+	xvr_recorder_open_fail:
+	free(recorder);
+	recorder = NULL;
+	return NULL;
 }
 
 int CFFStreamServer::ffserver_save_avoption(const char *opt, const char *arg, int type,	FFServerConfig *config)
@@ -115,34 +167,6 @@ int CFFStreamServer::ffserver_save_avoption(const char *opt, const char *arg, in
 		return AVERROR(ENOMEM);
 	} 
 	return 0;
-}
-
-void CFFStreamServer::ffserver_get_arg(char *buf, int buf_size, const char *pp)
-{
-	const char *p;
-	char *q;
-	int quote = 0;
-
-	p = pp;
-	q = buf;
-
-	while (av_isspace(*p)) p++;
-
-	if (*p == '\"' || *p == '\'')
-		quote = *p++;
-
-	while (*p != '\0') {
-		if (quote && *p == quote || !quote && av_isspace(*p))
-			break;
-		if ((q - buf) < buf_size - 1)
-			*q++ = *p;
-		p++;
-	}
-
-	*q = '\0';
-	if (quote && *p == quote)
-		p++;
-	pp = p;
 }
 
 
@@ -453,6 +477,453 @@ error:
 		va_end(vl);
 	} */
 	return AVERROR(EINVAL);
+}
+
+static DWORD WINAPI RecordThreadProc(PLAYER *player)
+{
+	AVPacket *packet = NULL;
+
+	int i_vid_index = player->iVideoStreamIndex;
+	int i_aud_index = player->iAudioStreamIndex;
+
+	AVStream* in_vid_strm = player->pAVFormatContext->streams[i_vid_index];
+	AVStream* in_aud_strm = player->pAVFormatContext->streams[i_aud_index];
+
+	AVFormatContext *ofcx = player->pOutAVFormatContext;
+	AVOutputFormat *ofmt = player->pOutFormat;
+	AVStream *out_vid_strm = player->pOutVidStream;
+	AVStream *out_aud_strm = player->pOutAudStream;
+
+	int64_t recordingStartVidPTS = -1, recordingStartAudPTS = -1;
+	int64_t recordingStartVidDTS = -1, recordingStartAudDTS = -1;
+	AVPacket outpkt;
+
+	int iCurPTS = 0;
+	
+	if (player->bDecode)
+		iCurPTS = rendergetcurpts(player->hCoreRender);
+	else
+		iCurPTS = pktqueue_get_cur_pts(&(player->PacketQueue));
+
+	iCurPTS /= player->dVideoTimeBase;
+
+	long curpos = player->nRecStartPOS; //pktqueue_find_record_start_pos(&(player->PacketQueue), i_vid_index, iCurPTS, 3);
+
+	int64_t nGenedTime = 0;
+	bool fWrite = false;
+
+	while (player->isRecording && player->nPlayerStatus == PLAYER_PLAY)
+	{
+		long fhead = player->PacketQueue.fhead;
+		
+		if (curpos == fhead)
+		{
+			pktqueue_read_done(&(player->PacketQueue));
+			::Sleep(100);
+			continue;
+		}
+
+		pktqueue_read_request(&(player->PacketQueue), &packet, curpos);
+
+		if ((packet->flags & AV_PKT_FLAG_CORRUPT) == AV_PKT_FLAG_CORRUPT || (packet->pts < 0 || packet->dts < 0))
+		{			
+			pktqueue_read_done(&(player->PacketQueue));
+			//TRACE("Corrupted...\n");
+			curpos++;
+			if (curpos == player->PacketQueue.fsize)
+				curpos = 0;
+			continue;
+		}
+
+
+		if (packet->stream_index == i_vid_index)
+		{
+
+			if (player->isVRecordingFirst /*&& (packet->flags & AV_PKT_FLAG_KEY)*/)
+			{
+				player->isVRecordingFirst = false;
+				recordingStartVidPTS = packet->pts;
+				recordingStartVidDTS = packet->dts;
+			}
+
+			if (!player->isVRecordingFirst)
+			{
+				av_init_packet(&outpkt);
+
+				outpkt.data = packet->data;
+				outpkt.size = packet->size;
+				outpkt.stream_index = packet->stream_index;
+
+				outpkt.flags = packet->flags;
+				if (packet->pts > 0)
+				{
+					outpkt.pts = av_rescale_q(packet->pts - recordingStartVidPTS, in_vid_strm->time_base, out_vid_strm->time_base);
+					outpkt.dts = av_rescale_q(packet->dts - recordingStartVidDTS, in_vid_strm->time_base, out_vid_strm->time_base);
+				}
+				else
+				{
+					outpkt.pts = packet->pts;
+					outpkt.dts = packet->dts;
+				}
+
+				//if (outpkt.buf)
+				{
+					if (player->nRecMode == RECORD_ALWAYS || player->nRecMode == RECORD_MOTION_DETECT || player->nRecMode == RECORD_VOICE_DETECT ||
+						(player->nRecMode == RECORD_KEYFRAME && (outpkt.flags & AV_PKT_FLAG_KEY) == AV_PKT_FLAG_KEY))
+					{
+
+						if (av_interleaved_write_frame(ofcx, &outpkt) < 0)
+						{
+							//TRACE("Failed Video Write...\n");
+						}
+						else
+						{
+							out_vid_strm->codec->frame_number++;
+						}
+					}
+
+					if (player->nRecMode == RECORD_SMART )
+					{
+						int64_t dur = 4000000;
+
+						if (player->bDetected == true)
+						{
+							//nGenedTime = GetTickCount64(); // packet->pts;
+							nGenedTime = packet->pts;
+							//player->bDetected = false;
+							player->nAfterRecTime /= player->dVideoTimeBase;
+							fWrite = true;
+						}
+						
+						if (fWrite && !player->bDetected)
+						{
+							//dur = GetTickCount64() - nGenedTime;//packet->pts - nGenedTime;
+							dur = packet->pts - nGenedTime;
+
+							if (fWrite && dur > player->nAfterRecTime * 1000 && (outpkt.flags & AV_PKT_FLAG_KEY))
+							{
+								fWrite = false;							
+								nGenedTime = 0;
+							}
+						}
+
+						if ((outpkt.flags & AV_PKT_FLAG_KEY) == AV_PKT_FLAG_KEY || fWrite)
+						{												
+
+							if (av_interleaved_write_frame(ofcx, &outpkt) < 0)
+							{
+								//TRACE("Failed Video Write...\n");
+							}
+							else
+							{
+								out_vid_strm->codec->frame_number++;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		else if (packet->stream_index == i_aud_index)
+		{
+			if (!player->isVRecordingFirst && player->isARecordingFirst)
+			{
+				recordingStartAudPTS = packet->pts;
+				recordingStartAudDTS = packet->pts;
+				player->isARecordingFirst = false;
+			}
+
+			if (!player->isVRecordingFirst && !player->isARecordingFirst)
+			{
+				av_init_packet(&outpkt);
+				outpkt.data = packet->data;
+				outpkt.size = packet->size;
+				outpkt.stream_index = packet->stream_index;
+				outpkt.flags = packet->flags;
+
+				if (packet->pts > 0)
+				{
+					outpkt.pts = av_rescale_q(packet->pts - recordingStartAudPTS, in_aud_strm->time_base, out_aud_strm->time_base);
+					outpkt.dts = av_rescale_q(packet->dts - recordingStartAudDTS, in_aud_strm->time_base, out_aud_strm->time_base);
+				}
+				else
+				{
+					outpkt.pts = packet->pts;
+					outpkt.dts = packet->dts;
+				}
+
+				//if (outpkt.buf)
+				{
+					if (av_interleaved_write_frame(ofcx, &outpkt) < 0)
+					{
+						//TRACE("Failed Audio Write...\n");
+					}
+					else
+					{
+						out_aud_strm->codec->frame_number++;
+					}
+				}
+
+			}
+		}
+
+		pktqueue_read_done(&(player->PacketQueue));
+
+		curpos++;
+
+		if (curpos == player->PacketQueue.fsize)
+			curpos = 0;
+	}
+
+	return 0;
+}
+
+static DWORD WINAPI StopRecordThreadProc(PLAYER *player)
+{
+	::Sleep(player->nAfterRecTime * 1000);
+
+	if (!player->hRecordThread)
+		return true;
+
+	{
+		player->isRecording = false;
+
+		//TRACE("WAIT HANDLE 0 : %x\n", player->hRecordThread);
+		WaitForSingleObject(player->hRecordThread, -1);
+		CloseHandle(player->hRecordThread);
+		player->hRecordThread = NULL;
+
+		AVFormatContext *ofcx = player->pOutAVFormatContext;
+		AVOutputFormat *ofmt = player->pOutFormat;
+
+		if (ofcx)
+		{
+			av_write_trailer(ofcx);
+			avio_close(ofcx->pb);
+			avformat_free_context(ofcx);
+		}
+
+		player->isARecordingFirst = true;
+		player->isVRecordingFirst = true;
+	}	
+
+	return true;
+}
+
+void	__stdcall FFM_API_GenerateSignal(HANDLE hPlayer, int nAfterSec)
+{
+	PLAYER* player = (PLAYER*)hPlayer;
+
+	if (!player->isRecording || player->nRecMode != RECORD_SMART)
+		return;
+
+	player->nAfterRecTime = nAfterSec;
+	player->bDetected = !(player->bDetected);
+}
+
+BOOL	__stdcall FFM_API_StartRecording(HANDLE hPlayer, const char *szOutUrl, int mode, int nPreRecTime)
+{
+	int ret = 0;
+	
+	PLAYER* player = (PLAYER*)hPlayer;
+
+	if (player->isRecording)
+		return FALSE;
+
+	if (szOutUrl)
+		strcpy(player->szOutUrl, szOutUrl);
+	else
+		return FALSE;
+
+	if (mode == RECORD_NO)
+		return FALSE;
+
+	if ( mode == RECORD_MOTION_DETECT || mode == RECORD_VOICE_DETECT)
+		player->nPreRecTime = nPreRecTime;
+	else
+	{
+		player->nPreRecTime = 0;
+	}	
+
+	////////////////// for the temp ////////////////////
+	// player->nPreRecTime = 0;
+	////////////////////////////////////////////////////
+
+	AVFormatContext *ofcx = NULL;
+	AVOutputFormat *ofmt = NULL;
+
+	ofmt = av_guess_format(NULL, player->szOutUrl, NULL);
+	ofmt = av_guess_format(NULL, "tmp.avi", NULL);
+	ofcx = avformat_alloc_context();
+	ofcx->oformat = ofmt;
+
+	// Create output stream
+	AVCodec *out_vid_codec = NULL, *out_aud_codec = NULL;
+
+	AVStream *in_vid_strm = NULL, *in_aud_strm = NULL, *out_vid_strm = NULL, *out_aud_strm = NULL;
+
+	if (player->iVideoStreamIndex == -1)
+		in_vid_strm = NULL;
+	else
+		in_vid_strm = player->pAVFormatContext->streams[player->iVideoStreamIndex];
+
+	if (player->iAudioStreamIndex == -1)
+		in_aud_strm = NULL;
+	else
+		in_aud_strm = player->pAVFormatContext->streams[player->iAudioStreamIndex];
+
+	if (ofmt->video_codec != AV_CODEC_ID_NONE && in_vid_strm != NULL)
+	{
+		out_vid_codec = avcodec_find_encoder(ofmt->video_codec);
+		if (NULL == out_vid_codec)
+		{
+			ret = RTSP_CODEC_OPEN_FAILED;
+			return false;
+		}
+		else
+		{
+			out_vid_strm = avformat_new_stream(ofcx, out_vid_codec);
+			if (NULL == out_vid_strm)
+			{
+				ret = RTSP_CODEC_OPEN_FAILED;
+				return false;
+			}
+			else
+			{
+				if (avcodec_copy_context(out_vid_strm->codec, in_vid_strm->codec) != 0)
+				{
+					ret = RTSP_CODEC_OPEN_FAILED;
+					return false;
+				}
+				else
+				{
+
+				}
+			}
+		}
+	}
+
+
+	if (ofmt->audio_codec != AV_CODEC_ID_NONE && in_aud_strm != NULL)
+	{
+		out_aud_codec = avcodec_find_encoder(ofmt->audio_codec);
+		if (NULL == out_aud_codec)
+		{
+			ret = RTSP_CODEC_OPEN_FAILED;
+			return false;
+		}
+		else
+		{
+			out_aud_strm = avformat_new_stream(ofcx, out_aud_codec);
+			if (NULL == out_aud_strm)
+			{
+				ret = RTSP_CODEC_OPEN_FAILED;
+				return false;
+			}
+			else
+			{
+				if (avcodec_copy_context(out_aud_strm->codec, in_aud_strm->codec) != 0)
+				{
+					ret = RTSP_CODEC_OPEN_FAILED;
+					return false;
+				}
+				else
+				{
+
+				}
+			}
+		}
+	}
+
+	if (!(ofmt->flags & AVFMT_NOFILE))
+	{
+		if (avio_open2(&ofcx->pb, player->szOutUrl, AVIO_FLAG_WRITE, NULL, NULL) < 0)
+		{
+			ret = RTSP_CODEC_OPEN_FAILED;
+			return false;
+		}
+	}
+	/* Write the stream header, if any. */
+	if (avformat_write_header(ofcx, NULL) < 0)
+	{
+		ret = RTSP_CODEC_OPEN_FAILED;
+		return false;
+	}
+
+	strcpy_s(ofcx->filename, player->szOutUrl);
+
+	player->pOutFormat = ofmt;
+	player->pOutAVFormatContext = ofcx;
+	player->pOutVidStream = out_vid_strm;
+	player->pOutAudStream = out_aud_strm;
+
+	player->isRecording = true;
+	player->isVRecordingFirst = true;
+	player->isARecordingFirst = true;
+
+	int i_vid_index = player->iVideoStreamIndex;
+	int i_aud_index = player->iAudioStreamIndex;
+
+	int iCurPTS = 0;
+	if (player->bDecode)
+		iCurPTS = rendergetcurpts(player->hCoreRender);
+	else
+		iCurPTS = pktqueue_get_cur_pts(&(player->PacketQueue));
+
+	iCurPTS /= player->dVideoTimeBase;
+
+	player->nRecStartPOS = pktqueue_find_record_start_pos(&(player->PacketQueue), i_vid_index, iCurPTS, player->nPreRecTime * player->nInputFps);
+
+	player->nRecMode = (RECORD_MODE)mode;
+
+	player->hRecordThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)RecordThreadProc, player, 0, 0);
+
+	return true; 
+}
+
+void __stdcall FFM_API_StopRecording(HANDLE hPlayer, int nAfterRecTime)
+{
+	PLAYER* player = (PLAYER*)hPlayer;
+
+	if (!player->hRecordThread)
+		return;
+	
+	if (player->nRecMode == RECORD_MOTION_DETECT || player->nRecMode == RECORD_VOICE_DETECT)
+		player->nAfterRecTime = nAfterRecTime;
+	else
+	{
+		player->nAfterRecTime = 0;
+	}
+
+	TRACE("\n---------AfterRecTime---------%d\n", player->nAfterRecTime);
+
+	player->hRecordStopThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)StopRecordThreadProc, player, 0, 0);
+
+	WaitForSingleObject(player->hRecordStopThread, -1);
+	CloseHandle(player->hRecordStopThread);
+	player->hRecordStopThread = NULL;
+
+	PLAYER* player = (PLAYER*)hPlayer;
+
+	if (!player->isRecording)
+		return;
+
+	{
+		player->isRecording = false;
+
+		AVFormatContext *ofcx = player->pOutAVFormatContext;
+		AVOutputFormat *ofmt = player->pOutFormat;
+
+		if (ofcx)
+		{
+			av_write_trailer(ofcx);
+			avio_close(ofcx->pb);
+			avformat_free_context(ofcx);
+		}
+
+		player->isARecordingFirst = true;
+		player->isVRecordingFirst = true;
+	} 
 }
 
 int CFFStreamServer::ffserver_save_avoption_int(const char *opt, int64_t arg,	int type, FFServerConfig *config)
@@ -943,42 +1414,6 @@ nomem:
 	avcodec_free_context(&config->dummy_vctx);
 	avcodec_free_context(&config->dummy_actx);
 	return AVERROR(ENOMEM);
-}
-
-int CFFStreamServer::ffserver_parse_config_redirect(FFServerConfig *config, const char *cmd, const char **p, FFServerStream **predirect)
-{
-/*	FFServerStream *redirect;
-	av_assert0(predirect);
-	redirect = *predirect;
-
-	if (!av_strcasecmp(cmd, "<Redirect")) {
-		char *q;
-		redirect = (FFServerStream*)av_mallocz(sizeof(FFServerStream));
-		if (!redirect)
-			return AVERROR(ENOMEM);
-
-		ffserver_get_arg(redirect->filename, sizeof(redirect->filename), p);
-		q = strrchr(redirect->filename, '>');
-		if (*q)
-			*q = '\0';
-		redirect->stream_type = STREAM_TYPE_REDIRECT;
-		*predirect = redirect;
-		return 0;
-	}
-	av_assert0(redirect);
-	if (!av_strcasecmp(cmd, "URL")) {
-		ffserver_get_arg(redirect->feed_filename,
-			sizeof(redirect->feed_filename), p);
-	}
-	else if (!av_strcasecmp(cmd, "</Redirect>")) {
-		if (!redirect->feed_filename[0])
-			ERROR("No URL found for <Redirect>\n");
-		*predirect = NULL;
-	}
-	else {
-		ERROR("Invalid entry '%s' inside <Redirect></Redirect>\n", cmd);
-	}*/
-	return 0;
 }
 
 int CFFStreamServer::ffserver_parse_ffconfig(const char *filename, char* szRtspPort, char* szRtspName, FFServerConfig *config)

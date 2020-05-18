@@ -1713,42 +1713,31 @@ void __stdcall FFM_API_SetParameter(HANDLE hPlayer, DWORD id, DWORD param)
     }
 }
 
-void __stdcall FFM_API_GetParameter(HANDLE hPlayer, DWORD id, void *param)
+int CFFStreamServer::resolve_host(struct in_addr *sin_addr, const char *hostname)
 {
-    if (!hPlayer || !param) return;
-    PLAYER *player = (PLAYER*)hPlayer;
 
-    switch (id)
-    {
-    case PARAM_VIDEO_WIDTH:
-        if (!player->pVideoCodecContext) *(int*)param = 0;
-        else *(int*)param = player->pVideoCodecContext->width;
-        break;
-
-    case PARAM_VIDEO_HEIGHT:
-        if (!player->pVideoCodecContext) *(int*)param = 0;
-        else *(int*)param = player->pVideoCodecContext->height;
-        break;
-
-    case PARAM_GET_DURATION:
-        if (!player->pAVFormatContext) *(DWORD*)param = 0;
-        else *(DWORD*)param = (DWORD)(player->pAVFormatContext->duration / AV_TIME_BASE);
-        break;
-
-    case PARAM_GET_POSITION:
-        renderplaytime(player->hCoreRender, (DWORD*)param);
-        break;
-
-    case PARAM_RENDER_MODE:
-        *(int*)param = player->nRenderMode;
-		break;
-
-	case PARAM_ASPECT_RATIO:
-		if (!player->pVideoCodecContext) *(double*)param = 0;
-		else *(double*)param = av_q2d(player->pVideoCodecContext->sample_aspect_ratio);
-		break;
-    }
+	if (!ff_inet_aton(hostname, sin_addr)) {
+#if HAVE_GETADDRINFO
+		struct addrinfo *ai, *cur;
+		struct addrinfo hints = { 0 };
+		hints.ai_family = AF_INET;
+		if (getaddrinfo(hostname, NULL, &hints, &ai))
+			return -1;
+		/* getaddrinfo returns a linked list of addrinfo structs.
+		* Even if we set ai_family = AF_INET above, make sure
+		* that the returned one actually is of the correct type. */
+		for (cur = ai; cur; cur = cur->ai_next) {
+			if (cur->ai_family == AF_INET) {
+				*sin_addr = ((struct sockaddr_in *)cur->ai_addr)->sin_addr;
+				freeaddrinfo(ai);
+				return 0;
+			}
+		}
+		freeaddrinfo(ai);
+		return -1;
 }
+
+
 
 HANDLE	__stdcall FFM_API_Init()
 {
@@ -1811,113 +1800,43 @@ void	__stdcall FFM_API_StopRtspStreaming(void* handle)
 	}
 }
 
-void processClosing(HANDLE hPlayer, BOOL doCheckOpeningEnd = TRUE)
+BOOL pktqueue_create(PKTQUEUE *ppq)
 {
-	PLAYER* player = (PLAYER*)hPlayer;
-	if (doCheckOpeningEnd && player->stage == 1)
-	{
-		while (player->stage != 2)
-		{
-			Sleep(50);
-		}
-	}
+    int i;
 
+    // default size
+    if (ppq->asize == 0) ppq->asize = DEF_PKT_QUEUE_ASIZE;
+    if (ppq->vsize == 0) ppq->vsize = DEF_PKT_QUEUE_VSIZE;
+    ppq->fsize = ppq->asize + ppq->vsize;
 
-	//TerminateThread(player->hStreamingThread, 0);
-	//if (player->nPlayerStatus != PLAYER_STOP)
-	{
-		playerstop(hPlayer); 
-	}
-	std::list<HWND> listRenderWindow;
-	HANDLE           hCoreRender = NULL;
-	if (player->hCoreRender)
-	{
-		GetRenderWindowList(player->hCoreRender, listRenderWindow);
-		hCoreRender = player->hCoreRender;
-		renderclose(player->hCoreRender);
-		//player->hCoreRender = NULL;
-	}
-
-	if (player->pVideoCodecContext)
-	{
-		if (player->bUseDxva)
-		{
-			//dxva2_uninit(player->pVideoCodecContext);
-			//av_free(player->pVideoCodecContext->hwaccel_context);
-		}
-		avcodec_close(player->pVideoCodecContext);
-
-		if (player->bUseDxva)
-			dxva2_uninit(player->pVideoCodecContext);
-
-		player->pVideoCodecContext = NULL;
-	}
-
-	if (player->pAudioCodecContext)
-	{
-		avcodec_close(player->pAudioCodecContext);
-		player->pAudioCodecContext = NULL;
-	}
-
-	if (player->pAVFormatContext)
-	{
-		avformat_close_input(&(player->pAVFormatContext));
-		player->pAVFormatContext = NULL;
-	}
-
-	// destroy packet queue
-	pktqueue_destroy(&(player->PacketQueue));
-
-	//Render object`
-#if 0
-
-	fields to save and restore
-	player->szInUrl;
-	(RenderObject*)((RENDER)player->hCoreRender)->pRenderObject;
-	player->play_mode;
-	player->szRtspPort;
-	player->szRtspName;
-	player->pNotifyCallBackFunc
+    // alloc buffer & semaphore
+    ppq->bpkts = (AVPacket* )malloc(ppq->fsize * sizeof(AVPacket ));
+    ppq->fpkts = (AVPacket**)malloc(ppq->fsize * sizeof(AVPacket*));
+#if 1
+    ppq->fsemr = CreateSemaphore(NULL, ppq->fsize, ppq->fsize, NULL);
+    ppq->asemr = CreateSemaphore(NULL, 0         , ppq->asize, NULL);
+    ppq->asemw = CreateSemaphore(NULL, ppq->asize, ppq->asize, NULL);
+    ppq->vsemr = CreateSemaphore(NULL, 0         , ppq->vsize, NULL);
+    ppq->vsemw = CreateSemaphore(NULL, ppq->vsize, ppq->vsize, NULL);
 
 #endif
-	//
 
-	char szInUrl[1024];
-	void* pRenderObject;
-	PLAY_MODE		play_mode;
-	char szRtspPort[16];
-	char szRtspName[128];
-	NotifyCallBackFunc funcTmp;
-	
-	strcpy(szInUrl, player->szInUrl);
-	play_mode = player->play_mode;
-	strcpy(szRtspPort, player->szRtspPort);
-	strcpy(szRtspName, player->szRtspName);
+    // check invalid
+    if (  !ppq->bpkts || !ppq->fpkts || /*!ppq->apkts || !ppq->vpkts ||*/ !ppq->fsemr /*|| !ppq->asemr || !ppq->asemw || !ppq->vsemr || !ppq->vsemw*/) {
+        pktqueue_destroy(ppq);
+        return FALSE;
+    }
 
-	EnterCriticalSection(player->pcsNotify);
-	funcTmp = player->pNotifyCallBackFunc;
+    // clear packets
+    memset(ppq->bpkts, 0, ppq->fsize * sizeof(AVPacket ));
 
-	CRITICAL_SECTION* pCS = player->pcsNotify;
-	CRITICAL_SECTION* pCSBusy = player->pcsBusy;
-	memset(player, 0, sizeof(PLAYER));
-
-	strcpy(player->szInUrl, szInUrl);
-	player->play_mode = play_mode;
-	strcpy(player->szRtspPort, szRtspPort);
-	strcpy(player->szRtspName, szRtspName);
-	
-	player->pcsNotify = pCS;
-	player->pcsBusy = pCSBusy;
-
-	player->pNotifyCallBackFunc = funcTmp;
-	LeaveCriticalSection(player->pcsNotify);
-
-	player->hCoreRender = hCoreRender;
-	std::list<HWND>::iterator iter;
-	for (iter = listRenderWindow.begin(); iter != listRenderWindow.end(); iter++)
+    // init fpkts & fpktnum
+    for ( i = 0 ; i < ppq->fsize ; i++ ) 
 	{
-		AddRenderWindow(player->hCoreRender, *iter);
-	}
+        ppq->fpkts[i] = &(ppq->bpkts[i]);
+    }
+    ppq->fpktnum = ppq->fsize;
+    return TRUE;
 }
 
 //#ifdef USE_HWACCEL
@@ -1929,6 +1848,26 @@ AVPixelFormat GetHwFormat(AVCodecContext *s, const AVPixelFormat *pix_fmts)
 	return ist->hwaccel_pix_fmt;
 }
 //#endif
+
+void pktqueue_write_done_a(PKTQUEUE *ppq, bool bDecode)
+{
+//	//////TRACE("WAIT HANDLE 17 : %x\n", ppq->asemw);
+    
+	if (bDecode)
+	{
+		WaitForSingleObject(ppq->asemw, -1);
+
+		ppq->apkts[ppq->atail] = ppq->fpkts[ppq->fhead];
+		InterlockedIncrement(&(ppq->atail));
+		InterlockedCompareExchange(&(ppq->atail), 0, ppq->asize);
+		InterlockedIncrement(&(ppq->apktnum));
+	}
+
+	InterlockedIncrement(&(ppq->fhead));
+	InterlockedCompareExchange(&(ppq->fhead), 0, ppq->fsize);
+
+    ReleaseSemaphore(ppq->asemr, 1, NULL);
+}
 
 int processVideoReset(PLAYER* player)
 {
